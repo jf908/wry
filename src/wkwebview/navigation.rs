@@ -72,11 +72,19 @@ pub(crate) fn navigation_policy(
         (*handler).call((WKNavigationActionPolicy::Cancel,));
       }
     } else {
-      let function = &this.ivars().navigation_policy_function;
-      match function(url.to_string()) {
-        true => (*handler).call((WKNavigationActionPolicy::Allow,)),
-        false => (*handler).call((WKNavigationActionPolicy::Cancel,)),
-      };
+      let main_frame = action
+        .targetFrame()
+        .map_or(false, |frame| frame.isMainFrame());
+
+      if main_frame {
+        let function = &this.ivars().navigation_policy_function;
+        match function(url.to_string()) {
+          true => (*handler).call((WKNavigationActionPolicy::Allow,)),
+          false => (*handler).call((WKNavigationActionPolicy::Cancel,)),
+        };
+      } else {
+        (*handler).call((WKNavigationActionPolicy::Allow,))
+      }
     }
   }
 }
