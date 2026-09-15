@@ -37,14 +37,14 @@ use webkit2gtk::WebInspectorExt;
 use webkit2gtk::{
   AutoplayPolicy, CookieManagerExt, InputMethodContextExt, LoadEvent, NavigationPolicyDecision,
   NavigationPolicyDecisionExt, NetworkProxyMode, NetworkProxySettings, PolicyDecisionType,
-  PrintOperationExt, SettingsExt, URIRequest, URIRequestExt, UserContentInjectedFrames,
-  UserContentManager, UserContentManagerExt, UserScript, UserScriptInjectionTime,
-  WebContextExt as Webkit2gtkWeContextExt, WebView, WebViewExt, WebsiteDataManagerExt,
-  WebsiteDataManagerExtManual, WebsitePolicies,
+  PrintOperationExt, ResponsePolicyDecision, ResponsePolicyDecisionExt, SettingsExt, URIRequest,
+  URIRequestExt, UserContentInjectedFrames, UserContentManager, UserContentManagerExt, UserScript,
+  UserScriptInjectionTime, WebContextExt as Webkit2gtkWeContextExt, WebView, WebViewExt,
+  WebsiteDataManagerExt, WebsiteDataManagerExtManual, WebsitePolicies,
 };
 use webkit2gtk_sys::{
   webkit_get_major_version, webkit_get_micro_version, webkit_get_minor_version,
-  webkit_policy_decision_ignore, webkit_policy_decision_use,
+  webkit_policy_decision_ignore,
 };
 #[cfg(feature = "x11")]
 use x11_dl::xlib::*;
@@ -544,32 +544,46 @@ impl InnerWebView {
     // Navigation handler
     if let Some(navigation_handler) = attributes.navigation_handler.take() {
       webview.connect_decide_policy(move |_webview, policy_decision, policy_type| {
-        let handler = match policy_type {
-          PolicyDecisionType::NavigationAction => &navigation_handler,
+        let uri = match policy_type {
+          // WebKitGTK doesn't expose the target frame of a navigation action, so
+          // script-initiated loads (e.g. iframe src) are deferred to the response
+          // policy, which knows whether the load is for the main frame.
+          PolicyDecisionType::NavigationAction => {
+            let Some(policy) = policy_decision.dynamic_cast_ref::<NavigationPolicyDecision>()
+            else {
+              return false;
+            };
+            let Some(nav_action) = policy.navigation_action() else {
+              return false;
+            };
+            if !nav_action.is_user_gesture() {
+              return false;
+            }
+            nav_action.request().and_then(|r| r.uri())
+          }
+          PolicyDecisionType::Response => {
+            let Some(policy) = policy_decision.dynamic_cast_ref::<ResponsePolicyDecision>() else {
+              return false;
+            };
+            if !policy.is_main_frame_main_resource() {
+              return false;
+            }
+            policy.request().and_then(|r| r.uri())
+          }
           _ => return false,
         };
 
-        if let Some(policy) = policy_decision.dynamic_cast_ref::<NavigationPolicyDecision>() {
-          if let Some(nav_action) = policy.navigation_action() {
-            if let Some(uri_req) = nav_action.request() {
-              if let Some(uri) = uri_req.uri() {
-                let allow = handler(uri.to_string());
-                let pointer = policy_decision.as_ptr();
-                unsafe {
-                  if allow {
-                    webkit_policy_decision_use(pointer)
-                  } else {
-                    webkit_policy_decision_ignore(pointer)
-                  }
-                }
+        let Some(uri) = uri else {
+          return false;
+        };
 
-                return true;
-              }
-            }
-          }
+        if navigation_handler(uri.to_string()) {
+          // Defer to WebKit's default handler, which turns attachment responses into downloads
+          false
+        } else {
+          unsafe { webkit_policy_decision_ignore(policy_decision.as_ptr()) };
+          true
         }
-
-        false
       });
     }
 
